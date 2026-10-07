@@ -19,6 +19,9 @@ class InvestigationState(TypedDict, total=False):
     workspace_path: str
     workspace_source_type: str
 
+    # Repository Analysis
+    repository_summary: dict
+
     # Investigation
     investigation_plan: list
     current_step: str
@@ -32,3 +35,4 @@ class InvestigationState(TypedDict, total=False):
     iteration_count: int
     review_status: str
     final_diagnosis: dict
+    context_analysis: dict

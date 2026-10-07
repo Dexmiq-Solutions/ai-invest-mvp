@@ -37,7 +37,9 @@ def test_valid_investigation_creates_workspace(tmp_path):
 
     assert result["context_status"] == "sufficient"
     assert result["validation_errors"] == []
-    assert result["current_step"] == "workspace_ready"
+
+    # Phase 3 runs after workspace creation
+    assert result["current_step"] == "repository_analyzed"
 
     assert result["workspace_id"]
     assert result["workspace_path"]
@@ -47,6 +49,11 @@ def test_valid_investigation_creates_workspace(tmp_path):
 
     assert workspace.exists()
     assert (workspace / "sample_project" / "main.py").exists()
+
+
+# ============================================================
+# Input Validation
+# ============================================================
 
 
 def test_missing_problem_fails_validation(tmp_path):
@@ -106,7 +113,7 @@ def test_both_project_path_and_repository_url_fail_validation(tmp_path):
         {
             "problem": "My profile page returns 401 after login.",
             "project_path": str(project),
-            "repository_url": "https://github.com/example/project.git",
+            "repository_url": "https://github.com/Jaanvii07/QuickGPT",
         }
     )
 
@@ -183,6 +190,7 @@ def test_vague_problems_are_rejected(tmp_path, problem):
 
     assert result["context_status"] == "insufficient"
     assert result["current_step"] == "context_insufficient"
+
     assert result["missing_information"] == [
         "specific_problem"
     ]
@@ -237,6 +245,7 @@ def test_directory_project_is_copied_to_workspace(tmp_path):
     )
 
     assert result["workspace_source_type"] == "directory"
+    assert result["current_step"] == "repository_analyzed"
 
     workspace = Path(result["workspace_path"])
 
@@ -256,7 +265,6 @@ def test_original_directory_is_not_modified(tmp_path):
     project.mkdir()
 
     original_file = project / "main.py"
-
     original_content = "print('original')"
 
     original_file.write_text(original_content)
@@ -314,11 +322,14 @@ def test_zip_project_creates_workspace(tmp_path):
 
     assert result["context_status"] == "sufficient"
     assert result["workspace_source_type"] == "zip"
-    assert result["current_step"] == "workspace_ready"
+
+    # Phase 3 runs after workspace creation
+    assert result["current_step"] == "repository_analyzed"
 
     workspace = Path(result["workspace_path"])
 
     assert workspace.exists()
+
     assert (
         workspace / "sample_project" / "main.py"
     ).exists()
@@ -428,7 +439,7 @@ def test_git_repository_creates_workspace(tmp_path):
     )
 
     assert result["context_status"] == "sufficient"
-    assert result["current_step"] == "workspace_ready"
+    assert result["current_step"] == "repository_analyzed"
     assert result["workspace_source_type"] == "git"
 
     workspace = Path(result["workspace_path"])

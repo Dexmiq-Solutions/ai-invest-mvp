@@ -15,7 +15,7 @@ def main() -> None:
     result = graph.invoke(
         {
             "problem": "My profile page returns 401 after login.",
-            "project_path": ".",
+            "project_path": "C:\Users\Dellj'\OneDrive\STUDY\DevTender.zip",
             "problem_context": {
                 "expected_behavior": "Profile page should open after login.",
                 "actual_behavior": "The profile page returns HTTP 401.",

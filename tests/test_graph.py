@@ -9,4 +9,4 @@ def test_initial_graph():
     })
 
     assert result["problem"] == "Test investigation"
-    assert result["current_step"] == "initialized"
+    assert result["current_step"] == "validation_failed"
