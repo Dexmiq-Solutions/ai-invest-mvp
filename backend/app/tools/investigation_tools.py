@@ -1,5 +1,8 @@
+import logging
 from pathlib import Path
+import time
 
+logger = logging.getLogger("app.tools.investigation_tools")
 
 # Directories that should never be investigated
 IGNORED_DIRECTORIES = {
@@ -36,11 +39,13 @@ def _validate_workspace(workspace_path):
     workspace = Path(workspace_path).resolve()
 
     if not workspace.exists():
+        logger.warning("Workspace validation failed: Path does not exist: %s", workspace_path)
         raise ValueError(
             f"Workspace does not exist: {workspace_path}"
         )
 
     if not workspace.is_dir():
+        logger.warning("Workspace validation failed: Path is not a directory: %s", workspace_path)
         raise ValueError(
             f"Workspace is not a directory: {workspace_path}"
         )
@@ -62,6 +67,12 @@ def _safe_path(workspace, relative_path):
     try:
         target.relative_to(workspace)
     except ValueError:
+        logger.error(
+            "Security alert: Path traversal attempted outside workspace: '%s' resolved to '%s' (workspace: '%s')",
+            relative_path,
+            target,
+            workspace,
+        )
         raise ValueError(
             f"Path is outside the workspace: {relative_path}"
         )
@@ -98,12 +109,12 @@ def list_files(
 
     Returns both directories and files.
     """
-
+    start_time = time.time()
     workspace = _validate_workspace(workspace_path)
-
     target = _safe_path(workspace, path)
 
     if not target.exists():
+        logger.warning("list_files error: target path does not exist (%s)", path)
         return {
             "success": False,
             "path": path,
@@ -113,6 +124,7 @@ def list_files(
         }
 
     if not target.is_dir():
+        logger.warning("list_files error: target path is not a directory (%s)", path)
         return {
             "success": False,
             "path": path,
@@ -133,6 +145,7 @@ def list_files(
                 key=lambda p: (not p.is_dir(), p.name.lower())
             )
         except PermissionError:
+            logger.warning("list_files permission denied reading directory: %s", directory)
             return
 
         for child in children:
@@ -164,6 +177,15 @@ def list_files(
 
     scan(target)
 
+    elapsed = time.time() - start_time
+    logger.debug(
+        "list_files finished in %.3fs for subpath='%s': %d entries (truncated: %s)",
+        elapsed,
+        path,
+        len(entries),
+        len(entries) >= max_results,
+    )
+
     return {
         "success": True,
         "path": path or ".",
@@ -186,10 +208,11 @@ def search_code(
     """
     Search for a text query inside project files.
     """
-
+    start_time = time.time()
     workspace = _validate_workspace(workspace_path)
 
     if not query or not query.strip():
+        logger.warning("search_code error: search query is empty")
         return {
             "success": False,
             "query": query,
@@ -201,6 +224,7 @@ def search_code(
     target = _safe_path(workspace, path)
 
     if not target.exists():
+        logger.warning("search_code error: scope path does not exist (%s)", path)
         return {
             "success": False,
             "query": query,
@@ -229,8 +253,12 @@ def search_code(
             if _is_ignored(relative_path):
                 continue
 
+            if file_path.name in {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock"}:
+                continue
+
             if file_path.is_file():
                 files.append(file_path)
+
 
     # --------------------------------------------------------
     # Search each file
@@ -271,6 +299,17 @@ def search_code(
                 if len(results) >= max_results:
                     break
 
+    elapsed = time.time() - start_time
+    logger.debug(
+        "search_code finished in %.3fs for query='%s' (scope='%s'): %d matches across %d files (scanned %d files)",
+        elapsed,
+        query,
+        path,
+        len(results),
+        len(set(r["path"] for r in results)),
+        len(files),
+    )
+
     return {
         "success": True,
         "query": query,
@@ -294,12 +333,13 @@ def read_file(
     """
     Read a specific file inside the workspace.
     """
-
+    start_time = time.time()
     workspace = _validate_workspace(workspace_path)
 
     file_path = _safe_path(workspace, path)
 
     if not file_path.exists():
+        logger.warning("read_file error: file does not exist (%s)", path)
         return {
             "success": False,
             "path": path,
@@ -307,6 +347,7 @@ def read_file(
         }
 
     if not file_path.is_file():
+        logger.warning("read_file error: path is a directory, not a file (%s)", path)
         return {
             "success": False,
             "path": path,
@@ -320,6 +361,7 @@ def read_file(
         )
 
     except OSError as exc:
+        logger.warning("read_file error reading %s: %s", path, exc)
         return {
             "success": False,
             "path": path,
@@ -352,6 +394,18 @@ def read_file(
     if len(selected_content) > max_chars:
         selected_content = selected_content[:max_chars]
         truncated = True
+
+    elapsed = time.time() - start_time
+    logger.debug(
+        "read_file finished in %.3fs for '%s' (lines %d-%d of %d, %d chars, truncated: %s)",
+        elapsed,
+        path,
+        actual_start,
+        actual_end,
+        len(lines),
+        len(selected_content),
+        truncated,
+    )
 
     return {
         "success": True,

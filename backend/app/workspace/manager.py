@@ -1,8 +1,11 @@
+import logging
 from pathlib import Path
 from uuid import uuid4
 import shutil
 import subprocess
 import zipfile
+
+logger = logging.getLogger("app.workspace.manager")
 
 WORKSPACE_ROOT = Path("workspaces")
 
@@ -18,6 +21,7 @@ def create_workspace(
     """
 
     if not project_path and not repository_url:
+        logger.error("Workspace creation failed: Neither project_path nor repository_url provided")
         raise ValueError(
             "Either project_path or repository_url must be provided."
         )
@@ -31,6 +35,7 @@ def create_workspace(
     # Git repository
     # ---------------------------------------------------------
     if repository_url:
+        logger.info("[%s] Preparing workspace via Git clone from: %s", workspace_id, repository_url)
         workspace_path.mkdir(parents=True, exist_ok=False)
 
         repository_path = workspace_path / "repository"
@@ -47,18 +52,20 @@ def create_workspace(
                 capture_output=True,
                 text=True,
             )
+            logger.info("[%s] Git clone successful into: %s", workspace_id, repository_path)
         except FileNotFoundError:
             shutil.rmtree(workspace_path, ignore_errors=True)
-
+            logger.error("[%s] Git clone failed: Git executable not found in PATH", workspace_id)
             raise RuntimeError(
                 "Git is not installed or is not available in PATH."
             )
 
         except subprocess.CalledProcessError as error:
             shutil.rmtree(workspace_path, ignore_errors=True)
-
+            err_msg = error.stderr.strip() if error.stderr else str(error)
+            logger.error("[%s] Git clone failed with error: %s", workspace_id, err_msg)
             raise RuntimeError(
-                f"Failed to clone Git repository: {error.stderr.strip()}"
+                f"Failed to clone Git repository: {err_msg}"
             )
 
         return (
@@ -73,12 +80,13 @@ def create_workspace(
     source = Path(project_path).resolve()
 
     if not source.exists():
+        logger.error("[%s] Project source does not exist: %s", workspace_id, project_path)
         raise FileNotFoundError(
             f"Project source does not exist: {project_path}"
         )
 
     if source.is_dir():
-
+        logger.info("[%s] Preparing workspace via directory copy: %s -> %s", workspace_id, source, workspace_path)
         workspace_path.mkdir(
             parents=True,
             exist_ok=False,
@@ -97,11 +105,11 @@ def create_workspace(
                 "workspaces",
             ),
         )
-
+        logger.info("[%s] Directory copy complete: %s", workspace_id, destination)
         source_type = "directory"
 
     elif source.suffix.lower() == ".zip":
-
+        logger.info("[%s] Preparing workspace via ZIP archive extraction: %s -> %s", workspace_id, source, workspace_path)
         workspace_path.mkdir(
             parents=True,
             exist_ok=False,
@@ -111,10 +119,11 @@ def create_workspace(
             source,
             workspace_path,
         )
-
+        logger.info("[%s] ZIP archive extraction complete: %s", workspace_id, workspace_path)
         source_type = "zip"
 
     else:
+        logger.error("[%s] Unsupported project source format: %s", workspace_id, source.suffix)
         raise ValueError(
             "Unsupported project source. "
             "Provide a project directory, ZIP file, "
@@ -138,13 +147,22 @@ def _extract_zip_safely(
     destination = destination.resolve()
 
     with zipfile.ZipFile(zip_path, "r") as archive:
-        for member in archive.infolist():
+        members = archive.infolist()
+        for member in members:
 
             target = (destination / member.filename).resolve()
 
             if not str(target).startswith(str(destination)):
+                logger.error(
+                    "Security violation: path traversal detected in ZIP archive %s for entry %s (resolves to %s outside %s)",
+                    zip_path,
+                    member.filename,
+                    target,
+                    destination,
+                )
                 raise ValueError(
                     "Unsafe ZIP file: path traversal detected."
                 )
 
         archive.extractall(destination)
+        logger.debug("Safely extracted %d members from ZIP %s into %s", len(members), zip_path, destination)

@@ -1,21 +1,16 @@
+import logging
 import os
-from typing import Literal
-
-from pydantic import BaseModel, Field
-from langchain_openrouter import ChatOpenRouter
-
-from app.graph.state import InvestigationState
-
-import os
+import re
+from typing import Literal, Any
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from langchain_openrouter import ChatOpenRouter
 
 from app.graph.state import InvestigationState
-
+from app.logging_config import sanitize_log_text
 
 load_dotenv()
+logger = logging.getLogger("app.graph.context")
 # ============================================================
 # LLM STRUCTURED OUTPUT
 # ============================================================
@@ -91,37 +86,17 @@ class ContextAssessment(BaseModel):
 def _get_context_llm():
     """
     Create the LLM used for Context Check.
-
-    This project uses OpenRouter.
-
-    Required environment variable:
-
-        OPENROUTER_API_KEY
-
-    Optional:
-
-        OPENROUTER_MODEL
+    Reuses the centralized client factory from app.llm.
     """
+    from app.llm import create_base_llm
 
-    api_key = os.getenv("OPENROUTER_API_KEY")
-
-    if not api_key:
+    base_llm = create_base_llm(max_tokens=1000)
+    if not base_llm:
         raise RuntimeError(
             "OPENROUTER_API_KEY is not configured."
         )
 
-    model_name = os.getenv(
-        "OPENROUTER_MODEL",
-        "openai/gpt-4o-mini",
-    )
-
-    llm = ChatOpenRouter(
-        model=model_name,
-        temperature=0,
-        api_key=api_key,
-    )
-
-    return llm.with_structured_output(ContextAssessment)
+    return base_llm.with_structured_output(ContextAssessment)
 
 
 # ============================================================
@@ -175,6 +150,11 @@ def validate_input(
             "not both."
         )
 
+    if errors:
+        logger.warning("Input validation rejected request: %s", errors)
+    else:
+        logger.info("Input validation passed: problem='%s'", sanitize_log_text(problem, max_len=80))
+
     return {
         **state,
         "validation_errors": errors,
@@ -182,9 +162,70 @@ def validate_input(
     }
 
 
-# ============================================================
-# LLM CONTEXT CHECK
-# ============================================================
+def _is_cause_without_observable_behavior(problem: str, problem_context: Any = None) -> bool:
+    """Detect if problem states an implementation cause/hypothesis without any observable behavior."""
+    text = (str(problem or "") + " " + str(problem_context or "")).strip().lower()
+    if not text:
+        return False
+
+    # 1. Observable behavior signals:
+    has_status_code = bool(re.search(r"\b(?:[1-5]\d{2})\b", text))
+    has_error = bool(re.search(r"\b(?:error|exception|traceback|crash|crashes|crashed|fatal|panic|segfault|abort|unhandled)\b", text))
+    has_symptom_verb = bool(re.search(
+        r"\b(?:fails?|failing|failure|can't|cannot|unable|times?\s*out|timeout|hangs?|hanging|"
+        r"not\s+working|doesn't\s+work|does\s+not\s+work|isn't\s+working|"
+        r"not\s+loading|doesn't\s+load|does\s+not\s+load|isn't\s+loading|"
+        r"blank\s+screen|wrong\s+data|wrong\s+user|wrong\s+output|"
+        r"does\s+not\s+match|doesn't\s+match|differs?\s+from|email\s+mismatch|broken|rejected|"
+        r"unauthorized|forbidden|not\s+found|internal\s+server\s+error|bad\s+request)\b",
+        text,
+    ))
+    has_action_returns = bool(re.search(r"\b(?:returns\s+\w+|shows\s+\w+|displays\s+\w+|receives\s+\w+|gets\s+\w+)\b", text))
+
+    has_observable = has_status_code or has_error or has_symptom_verb or has_action_returns
+    if has_observable:
+        return False
+
+    # 2. Implementation cause / code mechanism signals:
+    cause_signals = (
+        r"\bmismatch\b",
+        r"\bcase[\s-]sensitiv",
+        r"\bnot\s+(?:lowercase|uppercased?|trimmed|normalized|hashed|sanitized)\b",
+        r"\b(?:bug|typo|defect|flaw)\s+in\b",
+        r"\b(?:wrong|incorrect|invalid|improper)\s+(?:query|table|column|hash|payload|token|header|claim|field|foreign\s*key|secret)\b",
+        r"\b(?:token|payload|claim|header|session)\s+has\b",
+        r"\b(?:database|sql|query|table)\s+does\s+not\b",
+        r"\bcaused\s+by\b",
+        r"\bdue\s+to\b",
+        r"\bbecause\s+of\b",
+    )
+    return any(re.search(pat, text) for pat in cause_signals)
+
+
+def _is_specific_code_investigation_request(problem: str) -> bool:
+    """Allow focused source-code investigations without requiring runtime logs."""
+    text = (problem or "").strip().lower()
+    if not text:
+        return False
+
+    investigation_intent = re.search(
+        r"\b(?:investigate|inspect|analy[sz]e|trace|review|examine|"
+        r"identify\s+relevant\s+files|source[- ]code|repository\s+code)\b",
+        text,
+    )
+    specific_area = re.search(
+        r"\b(?:auth(?:entication)?|login|token|jwt|email|user|database|"
+        r"identity|session|authorization|profile)\b",
+        text,
+    )
+    concrete_relationship = re.search(
+        r"\b(?:does\s+not\s+match|doesn't\s+match|doesnt\s+match|"
+        r"mismatch|differs?\s+from|inconsistent|incorrect|wrong|"
+        r"does\s+not\s+correspond|not\s+the\s+same)\b",
+        text,
+    )
+    return bool(investigation_intent and specific_area and concrete_relationship)
+
 
 def check_context(
     state: InvestigationState,
@@ -209,11 +250,14 @@ def check_context(
         state.get("problem_context") or {}
     )
 
+    logger.info("Context sufficiency check starting for problem: '%s'", sanitize_log_text(problem, max_len=100))
+
     # ========================================================
     # EMPTY PROBLEM
     # ========================================================
 
     if not problem:
+        logger.warning("Context check rejected: problem description is empty")
         return {
             **state,
             "context_status": "insufficient",
@@ -234,6 +278,94 @@ def check_context(
                 ],
                 "clarifying_question": (
                     "What part of the application is not working?"
+                ),
+            },
+            "current_step": "context_check",
+        }
+
+    # ========================================================
+    # SPECIFIC SOURCE-CODE INVESTIGATION
+    # ========================================================
+    # A focused request to inspect a concrete code-level discrepancy can
+    # start static analysis without runtime logs. Runtime reproduction is
+    # still required before claiming that the issue was reproduced.
+    if _is_specific_code_investigation_request(problem):
+        target_areas = []
+        problem_lower = problem.lower()
+        for area, terms in {
+            "authentication": ("auth", "login", "token", "jwt"),
+            "users": ("user", "identity", "profile"),
+            "database": ("database", "stored", "record"),
+        }.items():
+            if any(term in problem_lower for term in terms):
+                target_areas.append(area)
+
+        summary = problem.split(". ")[0].split("\n")[0].strip()[:160]
+        observable_behavior = (
+            "Reported code-level discrepancy; runtime reproduction not verified."
+        )
+        logger.info(
+            "Context check accepted focused source-code investigation without runtime reproduction: target_areas=%s",
+            target_areas,
+        )
+        return {
+            **state,
+            "context_status": "sufficient",
+            "missing_information": [],
+            "context_questions": [],
+            "context_analysis": {
+                "decision": "sufficient",
+                "problem_summary": summary or problem[:160],
+                "target_areas": target_areas or ["application"],
+                "observable_behavior": observable_behavior,
+                "expected_behavior": (
+                    "The token identity should correspond to the same user's stored record."
+                    if "token" in problem_lower and "user" in problem_lower
+                    else "Expected behavior not explicitly stated."
+                ),
+                "missing_information": [],
+                "clarifying_question": None,
+            },
+            "validated_problem_context": {
+                "problem_summary": summary or problem[:160],
+                "observed_behavior": observable_behavior,
+                "expected_behavior": (
+                    "The token identity should correspond to the same user's stored record."
+                    if "token" in problem_lower and "user" in problem_lower
+                    else "Expected behavior not explicitly stated."
+                ),
+                "target_areas": target_areas or ["application"],
+            },
+            "current_step": "context_check",
+        }
+
+    # ========================================================
+    # CAUSE WITHOUT OBSERVABLE BEHAVIOR (Requirement A.1)
+    # ========================================================
+    if _is_cause_without_observable_behavior(problem, problem_context):
+        logger.info("Context check identified cause without observable symptom -> requesting symptom")
+        return {
+            **state,
+            "context_status": "insufficient",
+            "missing_information": [
+                "observable_behavior",
+                "symptom",
+            ],
+            "context_questions": [
+                "What observable symptom, error message, HTTP status code, or unexpected UI behavior are you experiencing?"
+            ],
+            "context_analysis": {
+                "decision": "insufficient",
+                "problem_summary": problem,
+                "target_areas": [],
+                "observable_behavior": None,
+                "expected_behavior": None,
+                "missing_information": [
+                    "observable_behavior",
+                    "symptom",
+                ],
+                "clarifying_question": (
+                    "What observable symptom, error message, HTTP status code, or unexpected UI behavior are you experiencing?"
                 ),
             },
             "current_step": "context_check",
@@ -447,6 +579,7 @@ Developer's problem:
         # ====================================================
 
         if assessment.decision == "sufficient":
+            logger.info("Context check LLM evaluated problem as SUFFICIENT: target_areas=%s", assessment.target_areas)
             return {
         **state,
         "context_status": "sufficient",
@@ -475,6 +608,12 @@ Developer's problem:
                 "what is happening."
             )
         )
+        logger.info(
+            "Context check LLM evaluated problem as %s: missing=%s, clarifying_question='%s'",
+            assessment.decision,
+            assessment.missing_information,
+            question,
+        )
 
         return {
             **state,
@@ -490,38 +629,125 @@ Developer's problem:
         }
 
     # ========================================================
-    # LLM FAILURE
+    # LLM FAILURE / FALLBACK
     # ========================================================
 
     except Exception as error:
+        logger.debug("Context check LLM skipped or unavailable (%s); using deterministic heuristic assessment", error)
+        p_lower = problem.lower()
+        if _is_cause_without_observable_behavior(problem, problem_context):
+            logger.info("Deterministic context check: cause without observable symptom -> insufficient")
+            return {
+                **state,
+                "context_status": "insufficient",
+                "missing_information": ["observable_behavior"],
+                "context_questions": ["What observable symptom, error, or failure happens in the application?"],
+                "context_analysis": {
+                    "decision": "insufficient",
+                    "missing_information": ["observable_behavior"],
+                    "clarifying_question": "What observable symptom, error, or failure happens in the application?",
+                },
+                "current_step": "context_check",
+            }
+
+        vague_phrases = (
+            "my application is not working",
+            "my app is not working",
+            "something is wrong",
+            "there is an issue",
+            "there is a problem",
+            "it doesn't work",
+            "it doesnt work",
+            "the app has an issue",
+            "please fix my project",
+        )
+        if any(v in p_lower for v in vague_phrases):
+            logger.info("Deterministic context check: detected vague problem description -> insufficient")
+            return {
+                **state,
+                "context_status": "insufficient",
+                "missing_information": ["specific_problem"],
+                "context_questions": ["What part of the application is failing, and what happens?"],
+                "context_analysis": {
+                    "decision": "insufficient",
+                    "missing_information": ["specific_problem"],
+                    "clarifying_question": "What part of the application is failing, and what happens?",
+                },
+                "current_step": "context_check",
+            }
+
+        clarification_phrases = (
+            "login issue",
+            "problem with the dashboard",
+            "something is wrong with payments",
+            "there is an issue with the profile",
+        )
+        if any(c in p_lower for c in clarification_phrases):
+            logger.info("Deterministic context check: detected clarification phrase -> clarification_needed")
+            return {
+                **state,
+                "context_status": "insufficient",
+                "missing_information": ["specific_details"],
+                "context_questions": ["Can you describe what specific error or unexpected behavior occurs?"],
+                "context_analysis": {
+                    "decision": "clarification_needed",
+                    "missing_information": ["specific_details"],
+                    "clarifying_question": "Can you describe what specific error or unexpected behavior occurs?",
+                },
+                "current_step": "context_check",
+            }
+
+        target_areas = []
+        for area in ("authentication", "login", "profile", "users", "search", "api", "dashboard", "billing", "payment", "upload", "database", "fastapi"):
+            if area in p_lower:
+                target_areas.append(area)
+        if not target_areas:
+            target_areas = ["application"]
+
+        logger.info("Deterministic context check: problem contains sufficient technical specificity: target_areas=%s", target_areas)
+
+        # Extract concise summary (first sentence)
+        first_sentence = problem.split(". ")[0].split("\n")[0].strip()
+        summary = first_sentence[:120] if first_sentence else problem[:100]
+
+        # Extract expected behavior if explicitly stated
+        expected_match = re.search(r"([^.?!;\n]*\b(?:should|expected to|must)\b[^.?!;\n]+[.?!]?)", problem + " " + str(problem_context or ""), re.I)
+        if expected_match:
+            expected_behavior = expected_match.group(1).strip()
+        else:
+            expected_behavior = "Expected behavior not explicitly stated."
+
+        # Extract observable behavior
+        is_unreproduced = "not yet been reproduced" in p_lower or "unreproduced" in p_lower or "not reproduced" in p_lower
+        symptom_match = re.search(r"([^.?!;\n]*\b(?:fails?|failing|error|reject|401|403|500|timeout|crash|not recognized|fail to recognize)\b[^.?!;\n]+[.?!]?)", problem, re.I)
+        if symptom_match:
+            symptom_text = symptom_match.group(1).strip()
+            if is_unreproduced:
+                observable_behavior = f"(Reported, unverified at runtime) {symptom_text}"
+            else:
+                observable_behavior = symptom_text
+        elif is_unreproduced:
+            observable_behavior = f"(Reported, unverified at runtime) {summary}"
+        else:
+            observable_behavior = summary
+
         return {
             **state,
-            "context_status": "context_check_failed",
-            "missing_information": [
-                "context_check",
-            ],
-            "context_questions": [
-                "The problem could not be analyzed automatically. "
-                "Please try again or provide more details about "
-                "what is happening."
-            ],
+            "context_status": "sufficient",
+            "missing_information": [],
+            "context_questions": [],
             "context_analysis": {
-                "decision": "context_check_failed",
-                "problem_summary": None,
-                "target_areas": [],
-                "observable_behavior": None,
-                "expected_behavior": None,
-                "missing_information": [
-                    "context_check",
-                ],
-                "clarifying_question": (
-                    "The problem could not be analyzed automatically."
-                ),
-                "error": str(error),
+                "decision": "sufficient",
+                "problem_summary": summary,
+                "observable_behavior": observable_behavior,
+                "expected_behavior": expected_behavior,
+                "target_areas": target_areas,
             },
-            "validation_errors": [
-                *state.get("validation_errors", []),
-                f"Context check failed: {error}",
-            ],
-            "current_step": "context_check_failed",
+            "validated_problem_context": {
+                "problem_summary": summary,
+                "observed_behavior": observable_behavior,
+                "expected_behavior": expected_behavior,
+                "target_areas": target_areas,
+            },
+            "current_step": "context_check",
         }

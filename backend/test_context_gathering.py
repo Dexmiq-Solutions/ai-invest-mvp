@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 import sys
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -10,7 +10,19 @@ from app.repository.analyzer import analyze_repository
 from app.tools.investigation_tools import list_files, search_code, read_file
 
 
-WORKSPACE_PATH = (PROJECT_ROOT / "workspaces" / "ae57faaa-2210-4e6d-8efa-6849068ff906").resolve()
+def _resolve_test_workspace() -> Path:
+    ws_root = PROJECT_ROOT / "workspaces"
+    if ws_root.exists():
+        for candidate in ws_root.glob("**/taskflow"):
+            if candidate.is_dir() and (candidate / "package.json").exists():
+                return candidate
+        for candidate in ws_root.glob("*/*"):
+            if candidate.is_dir() and ((candidate / "package.json").exists() or (candidate / "requirements.txt").exists()):
+                return candidate
+    return (PROJECT_ROOT / "workspaces").resolve()
+
+
+WORKSPACE_PATH = _resolve_test_workspace()
 
 
 def test_context_gathering_real_workspace():

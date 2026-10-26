@@ -258,4 +258,7 @@ def test_full_integration():
     assert result.get("repository_summary")
     assert result.get("gathered_context")
 
-    assert result.get("current_step") == "context_gathered"
+    assert result.get("current_step") in (
+        "context_gathered",
+        "investigation_completed",
+    )

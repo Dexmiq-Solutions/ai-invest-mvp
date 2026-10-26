@@ -1,6 +1,10 @@
-from pathlib import Path
 import json
+import logging
+from pathlib import Path
 import subprocess
+import time
+
+logger = logging.getLogger("app.repository.analyzer")
 
 
 IGNORED_DIRECTORIES = {
@@ -106,24 +110,30 @@ ENTRY_POINT_NAMES = {
 
 
 def analyze_repository(workspace_path):
+    start_time = time.time()
     root = Path(workspace_path)
+    logger.info("Starting repository analysis on path: %s", workspace_path)
 
     if not root.exists():
+        logger.error("Repository analysis aborted: path does not exist (%s)", workspace_path)
         raise FileNotFoundError(
             f"Repository path does not exist: {workspace_path}"
         )
 
     if not root.is_dir():
+        logger.error("Repository analysis aborted: path is not a directory (%s)", workspace_path)
         raise NotADirectoryError(
             f"Repository path is not a directory: {workspace_path}"
         )
 
     # Workspace manager may wrap the actual project inside one directory.
-    root = _resolve_repository_root(root)
+    resolved_root = _resolve_repository_root(root)
+    if resolved_root != root:
+        logger.info("Unwrapped single project root: %s -> %s", root, resolved_root)
+    root = resolved_root
 
     files = _collect_files(root)
-
-    return {
+    summary = {
         "project_structure": _analyze_structure(root, files),
         "languages": _detect_languages(files),
         "frameworks": _detect_frameworks(root, files),
@@ -133,6 +143,18 @@ def analyze_repository(workspace_path):
         "test_directories": _detect_test_directories(root),
         "git_info": _get_git_info(root),
     }
+
+    elapsed = time.time() - start_time
+    logger.info(
+        "Repository analysis completed in %.2fs: %d files, languages=%s, frameworks=%s, entry_points=%d, test_dirs=%d",
+        elapsed,
+        len(files),
+        summary["languages"],
+        summary["frameworks"],
+        len(summary["entry_points"]),
+        len(summary["test_directories"]),
+    )
+    return summary
 
 
 def _resolve_repository_root(root: Path) -> Path:
